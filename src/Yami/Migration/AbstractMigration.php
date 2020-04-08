@@ -5,6 +5,7 @@ namespace Yami\Migration;
 use Symfony\Component\Yaml\{Yaml, Exception\ParseException};
 use Yami\Config\{Bootstrap, Utils};
 use Yami\Yaml\Adapter;
+use Yami\Secrets\{SecretsManagerFactory, Utils as SecretsUtil};
 use Console\Args;
 
 abstract class AbstractMigration
@@ -75,7 +76,7 @@ abstract class AbstractMigration
     {
         // Save last changes (just in case)
         if ($this->activeNode instanceof Node) {
-            $this->syncNode();
+            $this->syncNode(true);
         }
 
         $this->activeNode = $this->findNode($selector); // don't catch exception
@@ -112,16 +113,22 @@ abstract class AbstractMigration
     }
 
     /**
-     * Get an environment variable and validate it
+     * Get a secret value and validate it
      * 
      * @param string the name of the variable
      * @param array a list of validations to apply
      * 
      * @return mixed
      */
-    public function env(string $name, array $validations = [])
+    public function secret(string $name, array $validations = [])
     {
-        $value = getenv($name);
+        if (isset($this->environment->secretsManager)) {
+            $secretsManager = SecretsManagerFactory::instantiate($this->environment->secretsManager);
+            $value = $secretsManager->get($name);
+        } else {
+            $secretsManager = SecretsManagerFactory::instantiate();
+            $value = $secretsManager->get($name);
+        }
 
         if (isset($validations['default'])) {
             if ($value === false) {
@@ -129,9 +136,9 @@ abstract class AbstractMigration
             }
         }
         if (in_array('required', $validations)) {
-            if ($value === false) {
-                throw new \Exception(sprintf('Missing required environment variable "%s".', $name));
-            }        
+            if ($value === false || $value === '') {
+                throw new \Exception(sprintf('Missing required environment variable "%s".', SecretsUtil::keyToEnv($name)));
+            }
         }
         if (isset($validations['type'])) {
             switch($validations['type']) {
@@ -191,8 +198,12 @@ abstract class AbstractMigration
 
     /**
      * Save the latest node changes to the main tree
+     * 
+     * @param bool is this an interim update (another add) or a final one (save)?
+     * 
+     * @return void
      */
-    private function syncNode(): void
+    private function syncNode(bool $interimUpdate = false): void
     {
         if ($this->activeNode instanceof Node) {
             $keys = preg_match_all('/"[^"]*"|[^.]+/', $this->activeNode->getSelector(), $matches);
@@ -212,12 +223,12 @@ abstract class AbstractMigration
         }
 
         // Remove empty
-        if ($this->config->save->removeEmptyNodes) {
+        if (!$interimUpdate && $this->config->save->removeEmptyNodes) {
             $this->yaml = Utils::removeEmpty($this->yaml);
         }
 
         // Mask values
-        if ($this->config->save->maskValues) {
+        if (!$interimUpdate && $this->config->save->maskValues) {
             $this->yaml = Utils::maskValues($this->yaml);
         }
 
